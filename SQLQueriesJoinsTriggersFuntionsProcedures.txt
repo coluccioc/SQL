@@ -1,0 +1,108 @@
+--Check the status of DVD returns in the database to identify late and lost returns
+
+--Function islate() takes the rental ID and rental duration as input to determine
+--the status of the given rental. Returns a char(4) indicator
+CREATE OR REPLACE FUNCTION islate(rent_id integer,rent_duration integer)
+--Returning codes "Good" "Late" or "Lost"
+RETURNS char(4)
+LANGUAGE plpgsql
+AS 
+$$
+--Declare necessary variables for data transformation
+--rented - the date the DVD was rented out
+--returned - the date the DVD was returned (can be NULL)
+--deadline - the date the DVD should have been returned by to avoid being late
+DECLARE rented date;
+DECLARE returned date;
+DECLARE deadline date;
+BEGIN
+--find rented out date based on rental_id input
+SELECT rental_date::date
+FROM rental
+WHERE rental_id = rent_id
+INTO rented;
+--Determine Deadline as date rented + alloted days out
+deadline := rented + rent_duration;
+--find returned date based on rental_id input
+SELECT return_date::date
+FROM rental
+WHERE rental_id = rent_id
+INTO returned;
+--If it has not been returned, the DVD is missing
+IF returned IS NULL THEN
+RETURN 'LOST';
+ELSIF (returned > deadline) THEN
+RETURN 'LATE';
+ELSE
+RETURN 'GOOD';
+END IF;
+END;
+$$;
+
+--Initialize detailed table
+CREATE TABLE detailed(
+rental_id integer,
+customer_id integer,
+first_name varchar(45),
+last_name varchar(45),
+email varchar(50),
+return_status char(4)
+);
+
+--Create summary table
+CREATE TABLE summary(
+return_status CHAR(4),
+total INTEGER
+);
+
+--Creating procedure to refresh detailed table
+--Summary table will also refresh due to Trigger on detailed table
+CREATE OR REPLACE PROCEDURE create_detailed_table()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+--Clear current contents
+DELETE FROM detailed;
+--Delete from summary table in case of empty insert
+DELETE FROM summary;
+--Populate table with extracted data
+INSERT INTO detailed (rental_id, customer_id, first_name, last_name, email, return_status)
+SELECT r.rental_id, r.customer_id, cu.first_name, cu.last_name, cu.email, islate(rental_id, f.rental_duration) AS return_status
+FROM rental r
+JOIN inventory i ON (r.inventory_id = i.inventory_id)
+JOIN film f ON (i.film_id = f.film_id)
+JOIN customer cu ON (r.customer_id = cu.customer_id);
+RETURN;
+END;
+$$;
+
+--Function to clear & load summary table based off of detailed table
+CREATE OR REPLACE FUNCTION reload_summary()
+RETURNS TRIGGER
+LANGUAGE PLPGSQL
+AS $$
+BEGIN
+--Clear current contents
+DELETE FROM summary;
+INSERT INTO summary (return_status, total)
+--Counting total Late & Lost DVDs
+SELECT return_status, COUNT(*) AS total
+FROM detailed
+--Only worried about problematic returns
+WHERE return_status <> 'GOOD'
+GROUP BY return_status;
+RETURN NEW;
+END;
+$$;
+
+--Create trigger to update summary every time there is an addition to detailed
+--Trigger does the same thing whether we insert or update
+CREATE TRIGGER datailed_ins_or_upd
+AFTER INSERT OR UPDATE
+ON detailed
+FOR EACH STATEMENT
+EXECUTE PROCEDURE reload_summary();
+
+--Call procedure to refresh detailed & summary tables
+CALL create_detailed_table();
+SELECT * FROM summary;
